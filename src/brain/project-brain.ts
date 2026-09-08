@@ -129,7 +129,8 @@ export class ProjectBrainStore {
     const previous = this.mutationQueues.get(projectId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
-    this.mutationQueues.set(projectId, previous.then(() => current));
+    const queued = previous.then(() => current);
+    this.mutationQueues.set(projectId, queued);
     await previous;
     try {
       const data = await this.load(projectId);
@@ -139,7 +140,7 @@ export class ProjectBrainStore {
       return result;
     } finally {
       release();
-      if (this.mutationQueues.get(projectId) === current) this.mutationQueues.delete(projectId);
+      if (this.mutationQueues.get(projectId) === queued) this.mutationQueues.delete(projectId);
     }
   }
 
