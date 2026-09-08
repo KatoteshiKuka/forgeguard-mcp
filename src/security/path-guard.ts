@@ -1,4 +1,4 @@
-import { realpath, stat } from 'node:fs/promises';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 export class SecurityError extends Error {
@@ -58,4 +58,41 @@ export async function resolveExistingWorkspacePath(
   }
 
   return canonicalCandidate;
+}
+
+export async function resolveWorkspaceWritePath(
+  workspaceRoot: string,
+  requestedPath: string,
+): Promise<string> {
+  const canonicalRoot = await canonicalDirectory(workspaceRoot);
+  const lexicalCandidate = path.resolve(canonicalRoot, requestedPath);
+
+  if (!isInside(canonicalRoot, lexicalCandidate)) {
+    throw new SecurityError(`Path escapes workspace: ${requestedPath}`);
+  }
+
+  const canonicalParent = await realpath(path.dirname(lexicalCandidate));
+  if (!isInside(canonicalRoot, canonicalParent)) {
+    throw new SecurityError(`Parent directory escapes workspace through a symlink: ${requestedPath}`);
+  }
+
+  try {
+    const info = await lstat(lexicalCandidate);
+    if (info.isSymbolicLink()) {
+      throw new SecurityError(`Refusing to write through a symlink: ${requestedPath}`);
+    }
+    if (info.isDirectory()) {
+      throw new SecurityError(`Refusing to overwrite a directory: ${requestedPath}`);
+    }
+    const canonicalExisting = await realpath(lexicalCandidate);
+    if (!isInside(canonicalRoot, canonicalExisting)) {
+      throw new SecurityError(`Existing file escapes workspace: ${requestedPath}`);
+    }
+  } catch (error: unknown) {
+    if (error instanceof SecurityError) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') throw error;
+  }
+
+  return lexicalCandidate;
 }
