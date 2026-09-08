@@ -377,7 +377,7 @@ export function buildServer(config: ForgeGuardConfig): McpServer {
   server.registerTool(
     'transaction_apply',
     {
-      description: 'Commit transaction changes and cherry-pick them into the unchanged clean original project. Refuses stale or dirty originals.',
+      description: 'Run mandatory policy gates, then commit and apply transaction changes only if the original project is still clean and unchanged.',
       inputSchema: z.object({
         transactionId: z.string().uuid(),
         message: z.string().min(1).max(200).default('ForgeGuard transaction'),
@@ -386,8 +386,27 @@ export function buildServer(config: ForgeGuardConfig): McpServer {
     async ({ transactionId, message }) => {
       const transaction = transactions.get(transactionId);
       return text(await audit.run('transaction_apply', { transactionId, projectId: transaction.projectId }, async () => {
-        await policies.assert(transaction.projectId, 'allowFileWrite', config.commandAllowlist);
+        const policy = await policies.assert(transaction.projectId, 'allowFileWrite', config.commandAllowlist);
         await policies.assert(transaction.projectId, 'allowGitRead', config.commandAllowlist);
+
+        if (policy.applyGates && policy.applyGates.length > 0) {
+          const processPolicy = await policies.assert(transaction.projectId, 'allowProcessRun', config.commandAllowlist);
+          const allowlist = new Set(processPolicy.effectiveCommands);
+          for (const gate of policy.applyGates) {
+            const result = await runStructuredProcess({
+              workspaceRoot: transaction.worktreeRoot,
+              command: gate.command,
+              args: gate.args,
+              timeoutMs: gate.timeoutMs,
+              allowlist,
+              maxOutputBytes: config.maxOutputBytes,
+            });
+            if (result.exitCode !== 0) {
+              throw new Error(`Apply gate failed: ${gate.command} exited with ${result.exitCode}. ${result.stderr || result.stdout}`.trim());
+            }
+          }
+        }
+
         return transactions.apply(transactionId, message);
       }));
     },
