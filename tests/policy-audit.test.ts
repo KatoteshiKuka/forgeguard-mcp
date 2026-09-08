@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 describe('ProjectPolicyStore', () => {
-  it('can only narrow globally allowed commands', async () => {
+  it('can only narrow globally allowed commands and parses apply gates', async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), 'forgeguard-policy-'));
     created.push(stateDir);
     const store = new ProjectPolicyStore(stateDir);
@@ -21,11 +21,15 @@ describe('ProjectPolicyStore', () => {
     await writeFile(store.policyPath(projectId), JSON.stringify({
       allowFileWrite: false,
       allowedCommands: ['npm', 'python', 'not-global'],
+      applyGates: [
+        { command: 'npm', args: ['test'], timeoutMs: 45_000 },
+      ],
     }), 'utf8');
 
     const policy = await store.load(projectId, new Set(['npm', 'node']));
     expect(policy.allowFileWrite).toBe(false);
     expect(policy.effectiveCommands).toEqual(['npm']);
+    expect(policy.applyGates).toEqual([{ command: 'npm', args: ['test'], timeoutMs: 45_000 }]);
   });
 
   it('fails closed on invalid policy JSON', async () => {
