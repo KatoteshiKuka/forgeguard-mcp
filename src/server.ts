@@ -1,7 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { ForgeGuardConfig } from './config.js';
-import { directoryTree, readWorkspaceFile, searchWorkspaceText } from './filesystem/workspace-files.js';
+import {
+  directoryTree,
+  patchWorkspaceFile,
+  readWorkspaceFile,
+  searchWorkspaceText,
+  writeWorkspaceFile,
+} from './filesystem/workspace-files.js';
 import { ProjectRegistry } from './projects/project-registry.js';
 import { runStructuredProcess } from './terminal/process-executor.js';
 
@@ -43,7 +49,7 @@ export function buildServer(config: ForgeGuardConfig): McpServer {
   server.registerTool(
     'file_read',
     {
-      description: 'Read a UTF-8 file inside a registered workspace. Path traversal and symlink escapes are rejected.',
+      description: 'Read a UTF-8 file inside a registered workspace. Traversal, symlink escapes, sensitive files, and known secret patterns are guarded.',
       inputSchema: z.object({ projectId: z.string().uuid(), path: z.string().min(1) }),
     },
     async ({ projectId, path }) => {
@@ -53,9 +59,42 @@ export function buildServer(config: ForgeGuardConfig): McpServer {
   );
 
   server.registerTool(
+    'file_write',
+    {
+      description: 'Create or replace one UTF-8 file inside a registered workspace. Sensitive paths and symlink targets are rejected.',
+      inputSchema: z.object({
+        projectId: z.string().uuid(),
+        path: z.string().min(1),
+        content: z.string().max(5_000_000),
+      }),
+    },
+    async ({ projectId, path, content }) => {
+      const project = projects.get(projectId);
+      return text(await writeWorkspaceFile(project.root, path, content));
+    },
+  );
+
+  server.registerTool(
+    'file_patch',
+    {
+      description: 'Replace exactly one matching text block in a UTF-8 project file. Fails when the match is missing or ambiguous.',
+      inputSchema: z.object({
+        projectId: z.string().uuid(),
+        path: z.string().min(1),
+        oldText: z.string().min(1).max(1_000_000),
+        newText: z.string().max(1_000_000),
+      }),
+    },
+    async ({ projectId, path, oldText, newText }) => {
+      const project = projects.get(projectId);
+      return text(await patchWorkspaceFile(project.root, path, oldText, newText));
+    },
+  );
+
+  server.registerTool(
     'directory_tree',
     {
-      description: 'List a bounded directory tree inside a registered workspace.',
+      description: 'List a bounded directory tree inside a registered workspace while hiding sensitive files.',
       inputSchema: z.object({
         projectId: z.string().uuid(),
         path: z.string().default('.'),
@@ -71,7 +110,7 @@ export function buildServer(config: ForgeGuardConfig): McpServer {
   server.registerTool(
     'code_search',
     {
-      description: 'Search UTF-8 project files for an exact text fragment, ignoring common generated/vendor directories.',
+      description: 'Search UTF-8 project files for an exact text fragment, ignoring generated/vendor directories and sensitive files.',
       inputSchema: z.object({
         projectId: z.string().uuid(),
         query: z.string().min(1),
@@ -123,7 +162,7 @@ export function buildServer(config: ForgeGuardConfig): McpServer {
   server.registerTool(
     'process_run',
     {
-      description: 'Run one allowlisted executable in a project workspace using argv directly (no shell).',
+      description: 'Run one explicitly allowlisted executable in a project workspace using argv directly (no shell). Disabled by default until FORGEGUARD_COMMANDS is configured.',
       inputSchema: z.object({
         projectId: z.string().uuid(),
         command: z.string().min(1),
