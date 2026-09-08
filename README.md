@@ -2,38 +2,40 @@
 
 ForgeGuard MCP is an open-source, local-first Model Context Protocol (MCP) server for controlled AI access to software projects.
 
-It is designed for coding agents that need to inspect and modify project files without receiving unrestricted access to the entire machine.
+It is designed for coding agents that need to inspect, modify, test, and reason about projects without receiving unrestricted access to the entire machine.
 
-> Status: early development — `0.1.0-alpha.1`.
+> Status: early development — `0.2.0-alpha.1`.
 
-## What it already does
+## What v0.2 already does
 
-- register project workspaces only below explicitly allowed roots
-- list registered projects
-- read UTF-8 files
-- create/replace UTF-8 files
-- apply exact, unambiguous text patches
-- list bounded directory trees
-- search text across project files
-- run `git status` and `git diff` without a shell
-- optionally run explicitly allowlisted commands with `shell: false`
+- persistently register project workspaces only below explicitly allowed roots
+- read, atomically write, and exactly patch guarded UTF-8 files
+- list bounded directory trees and search project text
 - block common sensitive files such as `.env`, private keys, PEM/key files, and credentials files
-- redact several common token/private-key formats before returning file content
-- reject lexical path traversal and symlink escapes
-- cap process output and execution time
+- redact several common token/private-key patterns before returning content
+- reject lexical traversal and symlink escapes
+- run `git status` and `git diff` without a shell
+- optionally run explicitly allowlisted executables with `shell: false`
+- apply per-project policies stored outside project workspaces
+- maintain a structured local JSONL audit log without file bodies or command arguments
+- start isolated Git worktree transactions
+- edit, inspect, test, apply, or abort transaction changes without touching the original until apply
+- refuse transaction apply when the original repository has moved or become dirty
 
 ## Security defaults
 
 ForgeGuard is intentionally fail-closed.
 
-Two important environment variables control access:
+Important environment variables:
 
-- `FORGEGUARD_ALLOWED_ROOTS`: directories below which projects may be registered. If it is missing, `project_register` is denied.
-- `FORGEGUARD_COMMANDS`: comma-separated executables permitted through the generic `process_run` tool. It is empty by default.
+- `FORGEGUARD_ALLOWED_ROOTS`: directories below which projects may be registered. Missing means `project_register` is denied.
+- `FORGEGUARD_COMMANDS`: comma-separated executables permitted through generic process tools. Empty by default.
+- `FORGEGUARD_STATE_DIR`: persistent ForgeGuard state directory. Defaults to `~/.forgeguard`.
+- `FORGEGUARD_MAX_OUTPUT_BYTES`: maximum captured process output. Defaults to 1 MiB.
 
-Generic process execution is therefore disabled until the local user explicitly enables commands.
+Generic process execution is disabled until the local user explicitly enables commands.
 
-ForgeGuard v0.1 is **not an operating-system sandbox**. An explicitly permitted executable or repository script may still access resources outside the workspace through OS APIs or absolute paths. Do not enable generic process execution for untrusted repositories. Stronger process isolation is planned for a later milestone.
+ForgeGuard v0.2 is **not an operating-system sandbox**. An explicitly permitted executable or repository script can still access OS resources outside the workspace. Git worktree transactions isolate repository changes, not operating-system capabilities.
 
 See [`SECURITY.md`](SECURITY.md) for the current security boundary.
 
@@ -41,7 +43,7 @@ See [`SECURITY.md`](SECURITY.md) for the current security boundary.
 
 - Node.js 20+
 - npm
-- Git for the Git-specific tools
+- Git for Git tools and transactions
 
 ## Install
 
@@ -61,7 +63,7 @@ export FORGEGUARD_ALLOWED_ROOTS="$HOME/Projects"
 npm start
 ```
 
-Multiple roots use the operating system path delimiter:
+Multiple roots use the operating-system path delimiter:
 
 ```bash
 export FORGEGUARD_ALLOWED_ROOTS="$HOME/Projects:$HOME/Work"
@@ -78,19 +80,55 @@ Multiple Windows roots are separated with `;`.
 
 ## Optional command execution
 
-`process_run` has no allowed commands by default. To explicitly allow selected executables:
+`process_run` and `transaction_process_run` have no allowed commands by default.
 
 ```bash
 export FORGEGUARD_COMMANDS="npm,flutter,dart"
 ```
 
-Commands are spawned directly as an executable plus argv with `shell: false`. This prevents shell chaining/substitution syntax from being interpreted by ForgeGuard itself, but it does not turn the child process into an OS sandbox.
+Commands are spawned as an executable plus argv with `shell: false`. Shell chaining/substitution syntax is not interpreted by ForgeGuard itself.
+
+## Persistent state
+
+By default ForgeGuard stores local state under:
+
+```text
+~/.forgeguard/
+├── projects.json
+├── audit.jsonl
+├── policies/
+└── worktrees/
+```
+
+Override it with:
+
+```bash
+export FORGEGUARD_STATE_DIR="$HOME/.local/share/forgeguard"
+```
+
+## Per-project policy
+
+After registering a project, call `project_policy_get` to see its project id, effective policy, and policy file path.
+
+A policy file can look like:
+
+```json
+{
+  "allowFileRead": true,
+  "allowFileWrite": true,
+  "allowGitRead": true,
+  "allowProcessRun": true,
+  "allowedCommands": ["npm", "flutter"]
+}
+```
+
+`allowedCommands` can only narrow the global `FORGEGUARD_COMMANDS` set. It cannot grant additional executables.
+
+Malformed policy JSON fails closed for protected operations.
 
 ## MCP client configuration
 
 After `npm run build`, configure an MCP client to launch the compiled server over stdio.
-
-Example shape:
 
 ```json
 {
@@ -99,7 +137,8 @@ Example shape:
       "command": "node",
       "args": ["/absolute/path/to/forgeguard-mcp/dist/index.js"],
       "env": {
-        "FORGEGUARD_ALLOWED_ROOTS": "/Users/you/Projects"
+        "FORGEGUARD_ALLOWED_ROOTS": "/Users/you/Projects",
+        "FORGEGUARD_COMMANDS": "npm,flutter,dart"
       }
     }
   }
@@ -115,6 +154,7 @@ Adapt the surrounding configuration format to the MCP client you use.
 - `project_register`
 - `project_list`
 - `project_info`
+- `project_policy_get`
 
 ### Filesystem
 
@@ -133,6 +173,43 @@ Adapt the surrounding configuration format to the MCP client you use.
 
 - `process_run`
 
+### Transactions
+
+- `transaction_begin`
+- `transaction_list`
+- `transaction_status`
+- `transaction_diff`
+- `transaction_file_read`
+- `transaction_file_write`
+- `transaction_file_patch`
+- `transaction_process_run`
+- `transaction_apply`
+- `transaction_abort`
+
+### Audit
+
+- `audit_recent`
+
+## Recommended agent workflow
+
+```text
+project_register
+      ↓
+transaction_begin
+      ↓
+inspect / edit / patch inside transaction
+      ↓
+transaction_process_run (tests / analysis, if explicitly allowed)
+      ↓
+transaction_diff
+      ↓
+transaction_apply
+      │
+      └── refuses if original repo changed or became dirty
+```
+
+Use `transaction_abort` whenever the work should be discarded.
+
 ## Development
 
 ```bash
@@ -141,26 +218,19 @@ npm run build
 npm test
 ```
 
-The test suite includes path traversal, symlink escape, sensitive-file, write/patch, and real MCP stdio integration tests.
+The suite covers path traversal, symlink escape, sensitive-file handling, atomic writes, project persistence, per-project policy narrowing, audit metadata, real Git worktree apply/abort, and real MCP stdio integration with server restart.
 
 GitHub Actions runs build and tests on Node.js 20 and 22.
 
 ## Roadmap
 
-### v0.2
+### Next
 
-- persistent project registry
-- structured audit log
-- configurable per-project policy files
-- safer command profiles instead of generic executable-only allowlists
-- atomic file edits and richer diff output
-
-### v0.3
-
-- Git worktree transactions
-- automatic checkpoint / rollback
-- test gates before accepting AI changes
-- task state and project context
+- persistent active transaction recovery after server restart
+- named command profiles (`test`, `analyze`, `build`) instead of relying only on executable allowlists
+- test gates that can be attached to `transaction_apply`
+- richer transaction diff summaries
+- project task/context state
 
 ### Later
 
