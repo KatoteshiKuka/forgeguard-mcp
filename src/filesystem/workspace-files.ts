@@ -1,14 +1,49 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { resolveExistingWorkspacePath } from '../security/path-guard.js';
+import { resolveExistingWorkspacePath, resolveWorkspaceWritePath } from '../security/path-guard.js';
+import { assertNonSecretPath, redactKnownSecrets } from '../security/secret-guard.js';
 
 const DEFAULT_IGNORES = new Set(['.git', 'node_modules', 'dist', 'build', '.dart_tool', '.idea', '.vscode']);
 
 export async function readWorkspaceFile(root: string, requestedPath: string): Promise<string> {
+  assertNonSecretPath(requestedPath);
   const target = await resolveExistingWorkspacePath(root, requestedPath);
   const info = await stat(target);
   if (!info.isFile()) throw new Error(`Not a file: ${requestedPath}`);
-  return readFile(target, 'utf8');
+  return redactKnownSecrets(await readFile(target, 'utf8'));
+}
+
+export async function writeWorkspaceFile(
+  root: string,
+  requestedPath: string,
+  content: string,
+): Promise<{ path: string; bytes: number }> {
+  assertNonSecretPath(requestedPath);
+  const target = await resolveWorkspaceWritePath(root, requestedPath);
+  await writeFile(target, content, { encoding: 'utf8', flag: 'w' });
+  return { path: path.relative(root, target), bytes: Buffer.byteLength(content, 'utf8') };
+}
+
+export async function patchWorkspaceFile(
+  root: string,
+  requestedPath: string,
+  oldText: string,
+  newText: string,
+): Promise<{ path: string; replacements: number }> {
+  if (!oldText) throw new Error('oldText cannot be empty.');
+  assertNonSecretPath(requestedPath);
+  const target = await resolveWorkspaceWritePath(root, requestedPath);
+  const current = await readFile(target, 'utf8');
+
+  const first = current.indexOf(oldText);
+  if (first < 0) throw new Error('Exact patch target was not found.');
+  if (current.indexOf(oldText, first + oldText.length) >= 0) {
+    throw new Error('Exact patch target is ambiguous because it appears more than once.');
+  }
+
+  const updated = current.slice(0, first) + newText + current.slice(first + oldText.length);
+  await writeFile(target, updated, { encoding: 'utf8', flag: 'w' });
+  return { path: path.relative(root, target), replacements: 1 };
 }
 
 export async function directoryTree(
@@ -28,6 +63,11 @@ export async function directoryTree(
       if (DEFAULT_IGNORES.has(entry.name)) continue;
       const absolute = path.join(current, entry.name);
       const relative = path.relative(root, absolute) || '.';
+      try {
+        assertNonSecretPath(relative);
+      } catch {
+        continue;
+      }
       results.push(entry.isDirectory() ? `${relative}/` : relative);
       if (entry.isDirectory() && !entry.isSymbolicLink()) {
         await walk(absolute, depth + 1);
@@ -53,20 +93,27 @@ export async function searchWorkspaceText(
     for (const entry of entries) {
       if (results.length >= maxResults || DEFAULT_IGNORES.has(entry.name)) continue;
       const absolute = path.join(current, entry.name);
+      const relative = path.relative(root, absolute);
+      try {
+        assertNonSecretPath(relative);
+      } catch {
+        continue;
+      }
+
       if (entry.isDirectory() && !entry.isSymbolicLink()) {
         await walk(absolute);
       } else if (entry.isFile()) {
-        let text: string;
+        let fileText: string;
         try {
-          text = await readFile(absolute, 'utf8');
+          fileText = await readFile(absolute, 'utf8');
         } catch {
           continue;
         }
-        const lines = text.split(/\r?\n/);
+        const lines = fileText.split(/\r?\n/);
         for (let index = 0; index < lines.length && results.length < maxResults; index += 1) {
           const lineText = lines[index] ?? '';
           if (lineText.includes(query)) {
-            results.push({ path: path.relative(root, absolute), line: index + 1, text: lineText });
+            results.push({ path: relative, line: index + 1, text: redactKnownSecrets(lineText) });
           }
         }
       }
