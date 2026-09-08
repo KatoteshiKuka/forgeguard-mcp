@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { writeWorkspaceFile } from '../src/filesystem/workspace-files.js';
-import type { ProjectRecord } from '../src/projects/project-registry.js';
+import { ProjectRegistry, type ProjectRecord } from '../src/projects/project-registry.js';
 import { TransactionManager } from '../src/transactions/transaction-manager.js';
 
 const execFileAsync = promisify(execFile);
@@ -20,7 +20,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-async function createRepository(): Promise<{ root: string; stateDir: string; project: ProjectRecord }> {
+async function createRepository(): Promise<{ temp: string; root: string; stateDir: string; project: ProjectRecord }> {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'forgeguard-tx-'));
   created.push(temp);
   const root = path.join(temp, 'repo');
@@ -31,6 +31,7 @@ async function createRepository(): Promise<{ root: string; stateDir: string; pro
   await git(root, ['add', 'hello.txt']);
   await git(root, ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial']);
   return {
+    temp,
     root,
     stateDir,
     project: {
@@ -70,5 +71,24 @@ describe('TransactionManager', () => {
 
     expect(await readFile(path.join(root, 'hello.txt'), 'utf8')).toBe('original\n');
     expect(manager.list()).toEqual([]);
+  }, 30_000);
+
+  it('ignores tampered persistent transaction records that escape the managed worktree directory', async () => {
+    const { temp, root, stateDir } = await createRepository();
+    const registry = new ProjectRegistry([temp], stateDir);
+    const registered = await registry.register(root, 'registered-test');
+    const manager = new TransactionManager(stateDir, 1_048_576, [temp]);
+    const transaction = await manager.begin(registered);
+
+    const outsideWorktree = path.join(temp, 'forged-worktree');
+    await mkdir(outsideWorktree);
+    const raw = JSON.parse(await readFile(path.join(stateDir, 'transactions.json'), 'utf8')) as Array<Record<string, unknown>>;
+    raw[0] = { ...raw[0], worktreeRoot: outsideWorktree };
+    await writeFile(path.join(stateDir, 'transactions.json'), `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+
+    const recovered = new TransactionManager(stateDir, 1_048_576, [temp]);
+    expect(recovered.list()).toEqual([]);
+
+    await manager.abort(transaction.id);
   }, 30_000);
 });
