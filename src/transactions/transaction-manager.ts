@@ -137,7 +137,11 @@ export class TransactionManager {
     const commit = await this.git(transaction.worktreeRoot, ['rev-parse', 'HEAD']);
 
     try {
-      await this.git(transaction.projectRoot, ['cherry-pick', commit]);
+      await this.git(transaction.projectRoot, [
+        '-c', 'user.name=ForgeGuard',
+        '-c', 'user.email=forgeguard@localhost',
+        'cherry-pick', commit,
+      ]);
     } catch (error) {
       try {
         await this.git(transaction.projectRoot, ['cherry-pick', '--abort']);
