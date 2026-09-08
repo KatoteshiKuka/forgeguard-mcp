@@ -1,9 +1,33 @@
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { resolveExistingWorkspacePath, resolveWorkspaceWritePath } from '../security/path-guard.js';
 import { assertNonSecretPath, redactKnownSecrets } from '../security/secret-guard.js';
 
 const DEFAULT_IGNORES = new Set(['.git', 'node_modules', 'dist', 'build', '.dart_tool', '.idea', '.vscode']);
+
+async function atomicWriteUtf8(target: string, content: string): Promise<void> {
+  const temporary = path.join(path.dirname(target), `.forgeguard-${randomUUID()}.tmp`);
+  let existingMode: number | undefined;
+  try {
+    existingMode = (await stat(target)).mode;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  try {
+    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx', mode: existingMode ?? 0o600 });
+    if (existingMode !== undefined) await chmod(temporary, existingMode);
+    await rename(temporary, target);
+  } catch (error) {
+    try {
+      await unlink(temporary);
+    } catch {
+      // Best-effort cleanup of the temporary file.
+    }
+    throw error;
+  }
+}
 
 export async function readWorkspaceFile(root: string, requestedPath: string): Promise<string> {
   assertNonSecretPath(requestedPath);
@@ -20,7 +44,7 @@ export async function writeWorkspaceFile(
 ): Promise<{ path: string; bytes: number }> {
   assertNonSecretPath(requestedPath);
   const target = await resolveWorkspaceWritePath(root, requestedPath);
-  await writeFile(target, content, { encoding: 'utf8', flag: 'w' });
+  await atomicWriteUtf8(target, content);
   return { path: path.relative(root, target), bytes: Buffer.byteLength(content, 'utf8') };
 }
 
@@ -42,7 +66,7 @@ export async function patchWorkspaceFile(
   }
 
   const updated = current.slice(0, first) + newText + current.slice(first + oldText.length);
-  await writeFile(target, updated, { encoding: 'utf8', flag: 'w' });
+  await atomicWriteUtf8(target, updated);
   return { path: path.relative(root, target), replacements: 1 };
 }
 
@@ -60,7 +84,7 @@ export async function directoryTree(
     entries.sort((a, b) => a.name.localeCompare(b.name));
 
     for (const entry of entries) {
-      if (DEFAULT_IGNORES.has(entry.name)) continue;
+      if (DEFAULT_IGNORES.has(entry.name) || entry.name.startsWith('.forgeguard-') && entry.name.endsWith('.tmp')) continue;
       const absolute = path.join(current, entry.name);
       const relative = path.relative(root, absolute) || '.';
       try {
@@ -92,6 +116,7 @@ export async function searchWorkspaceText(
     const entries = await readdir(current, { withFileTypes: true });
     for (const entry of entries) {
       if (results.length >= maxResults || DEFAULT_IGNORES.has(entry.name)) continue;
+      if (entry.name.startsWith('.forgeguard-') && entry.name.endsWith('.tmp')) continue;
       const absolute = path.join(current, entry.name);
       const relative = path.relative(root, absolute);
       try {
