@@ -87,12 +87,16 @@ export class ProjectPolicyStore {
       ? policy.allowedCommands.filter((command) => globalCommands.has(command))
       : [...globalCommands];
 
-    return {
-      ...policy,
-      allowedCommands: policy.allowedCommands,
+    const effective: EffectiveProjectPolicy = {
+      allowFileRead: policy.allowFileRead,
+      allowFileWrite: policy.allowFileWrite,
+      allowGitRead: policy.allowGitRead,
+      allowProcessRun: policy.allowProcessRun,
       effectiveCommands: policy.allowProcessRun ? narrowed.sort() : [],
       source,
     };
+    if (policy.allowedCommands) effective.allowedCommands = [...policy.allowedCommands];
+    return effective;
   }
 
   async assert(projectId: string, capability: keyof Pick<ProjectPolicy, 'allowFileRead' | 'allowFileWrite' | 'allowGitRead' | 'allowProcessRun'>, globalCommands: ReadonlySet<string>): Promise<EffectiveProjectPolicy> {
