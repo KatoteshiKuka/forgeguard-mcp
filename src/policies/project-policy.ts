@@ -2,12 +2,19 @@ import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { SecurityError } from '../security/path-guard.js';
 
+export interface ApplyGate {
+  command: string;
+  args: string[];
+  timeoutMs: number;
+}
+
 export interface ProjectPolicy {
   allowFileRead: boolean;
   allowFileWrite: boolean;
   allowGitRead: boolean;
   allowProcessRun: boolean;
   allowedCommands?: string[];
+  applyGates?: ApplyGate[];
 }
 
 export interface EffectiveProjectPolicy extends ProjectPolicy {
@@ -22,6 +29,29 @@ const DEFAULT_POLICY: ProjectPolicy = {
   allowProcessRun: true,
 };
 
+function parseGate(value: unknown): ApplyGate {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new SecurityError('Each apply gate must be a JSON object.');
+  }
+  const input = value as Record<string, unknown>;
+  const allowedKeys = new Set(['command', 'args', 'timeoutMs']);
+  for (const key of Object.keys(input)) {
+    if (!allowedKeys.has(key)) throw new SecurityError(`Unknown apply gate key: ${key}`);
+  }
+  if (typeof input.command !== 'string' || !input.command.trim()) {
+    throw new SecurityError('Apply gate command must be a non-empty string.');
+  }
+  const args = input.args === undefined ? [] : input.args;
+  if (!Array.isArray(args) || args.length > 64 || args.some((item) => typeof item !== 'string' || item.includes('\0'))) {
+    throw new SecurityError('Apply gate args must be an array of at most 64 strings without NUL bytes.');
+  }
+  const timeoutMs = input.timeoutMs === undefined ? 120_000 : input.timeoutMs;
+  if (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 300_000) {
+    throw new SecurityError('Apply gate timeoutMs must be an integer between 1 and 300000.');
+  }
+  return { command: input.command.trim(), args: [...args] as string[], timeoutMs: timeoutMs as number };
+}
+
 function parsePolicy(value: unknown): ProjectPolicy {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new SecurityError('Project policy must be a JSON object.');
@@ -33,6 +63,7 @@ function parsePolicy(value: unknown): ProjectPolicy {
     'allowGitRead',
     'allowProcessRun',
     'allowedCommands',
+    'applyGates',
   ]);
   for (const key of Object.keys(input)) {
     if (!allowedKeys.has(key)) throw new SecurityError(`Unknown project policy key: ${key}`);
@@ -51,6 +82,13 @@ function parsePolicy(value: unknown): ProjectPolicy {
       throw new SecurityError('allowedCommands must be an array of strings.');
     }
     policy.allowedCommands = [...new Set(input.allowedCommands.map((item) => item.trim()).filter(Boolean))];
+  }
+
+  if (input.applyGates !== undefined) {
+    if (!Array.isArray(input.applyGates) || input.applyGates.length > 16) {
+      throw new SecurityError('applyGates must be an array with at most 16 entries.');
+    }
+    policy.applyGates = input.applyGates.map(parseGate);
   }
   return policy;
 }
@@ -96,6 +134,7 @@ export class ProjectPolicyStore {
       source,
     };
     if (policy.allowedCommands) effective.allowedCommands = [...policy.allowedCommands];
+    if (policy.applyGates) effective.applyGates = policy.applyGates.map((gate) => ({ ...gate, args: [...gate.args] }));
     return effective;
   }
 
