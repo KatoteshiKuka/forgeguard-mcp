@@ -15,7 +15,7 @@ function splitPathList(value: string | undefined): string[] {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ForgeGuardConfig {
-  const commands = (env.FORGEGUARD_COMMANDS ?? 'git,node,npm,npx,pnpm,yarn,python,python3,pytest,flutter,dart,cargo,cmake')
+  const commands = (env.FORGEGUARD_COMMANDS ?? '')
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);
