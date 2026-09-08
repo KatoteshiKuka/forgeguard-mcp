@@ -52,25 +52,28 @@ export async function runStructuredProcess(options: {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    let stdout = Buffer.alloc(0);
-    let stderr = Buffer.alloc(0);
+    let stdout = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let truncated = false;
 
-    const append = (current: Buffer, chunk: Buffer): Buffer => {
-      if (current.length >= maxOutputBytes) {
+    const append = (current: string, currentBytes: number, chunk: Buffer): [string, number] => {
+      if (currentBytes >= maxOutputBytes) {
         truncated = true;
-        return current;
+        return [current, currentBytes];
       }
-      const remaining = maxOutputBytes - current.length;
-      if (chunk.length > remaining) truncated = true;
-      return Buffer.concat([current, chunk.subarray(0, remaining)]);
+      const remaining = maxOutputBytes - currentBytes;
+      const accepted = chunk.subarray(0, remaining);
+      if (chunk.length > accepted.length) truncated = true;
+      return [current + accepted.toString('utf8'), currentBytes + accepted.length];
     };
 
     child.stdout.on('data', (chunk: Buffer) => {
-      stdout = append(stdout, chunk);
+      [stdout, stdoutBytes] = append(stdout, stdoutBytes, chunk);
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      stderr = append(stderr, chunk);
+      [stderr, stderrBytes] = append(stderr, stderrBytes, chunk);
     });
 
     const timer = setTimeout(() => {
@@ -90,8 +93,8 @@ export async function runStructuredProcess(options: {
         args,
         exitCode,
         signal,
-        stdout: stdout.toString('utf8'),
-        stderr: stderr.toString('utf8'),
+        stdout,
+        stderr,
         truncated,
       });
     });
