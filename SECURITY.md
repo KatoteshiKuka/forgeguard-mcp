@@ -21,11 +21,14 @@ ForgeGuard currently enforces application-level controls including:
 - generic process execution disabled by default
 - per-project policy files stored outside project workspaces
 - policy command lists that may only narrow the global command allowlist
+- mandatory policy apply gates for transactions
 - output limits and process timeouts
 - reduced child-process environment
-- local JSONL audit events that do not store file bodies or command arguments
+- local JSONL audit events that do not store file bodies, project context bodies, task bodies, or command arguments
 - Git worktree transactions that isolate changes before application
 - transaction apply refusal when the original worktree is dirty or has moved from the transaction base commit
+- persistent transaction recovery validated against registered projects, allowed roots, and the managed worktree directory
+- persistent Project Brain state stored outside source workspaces
 
 ## ForgeGuard state directory
 
@@ -34,35 +37,56 @@ Persistent state defaults to `~/.forgeguard` and can be moved with `FORGEGUARD_S
 It contains data such as:
 
 - `projects.json` — persistent registered workspace metadata
+- `transactions.json` — active transaction metadata
 - `audit.jsonl` — structured local audit events
 - `policies/<project-id>.json` — local per-project policies
-- `worktrees/` — temporary Git transaction worktrees
+- `brain/<project-id>.json` — explicit project context, tasks, notes, and decisions
+- `worktrees/` — managed Git transaction worktrees
 
-The state directory is intentionally outside project workspaces so ordinary file tools cannot directly edit policy or registry state.
+The state directory is intentionally outside project workspaces so ordinary ForgeGuard workspace file tools cannot directly edit the policy, registry, transaction metadata, or Project Brain that governs their project.
+
+The local user still controls these files through normal operating-system access. ForgeGuard therefore treats persistent security-sensitive state as untrusted input when it is loaded and validates it before using it to grant access.
 
 ## Per-project policies
 
-A missing policy uses ForgeGuard's safe defaults. A malformed policy fails closed for policy-protected operations instead of silently expanding access.
+A missing policy uses ForgeGuard's documented defaults. A malformed policy fails closed for policy-protected operations instead of silently expanding access.
 
 Project policy files can disable file reads, file writes, Git reads, and generic process execution. `allowedCommands` is intersected with the global `FORGEGUARD_COMMANDS` allowlist, so a project policy cannot grant a command that the local administrator did not globally enable.
 
+`applyGates` are mandatory once configured. Every gate must use an effectively authorized command and exit successfully before `transaction_apply` may commit/cherry-pick changes.
+
 ## Transaction safety
 
-`transaction_begin` requires a clean Git worktree. Changes are made in a separate Git worktree and branch under the ForgeGuard state directory.
+`transaction_begin` requires a clean Git worktree. Changes are made in a separate worktree and branch under the ForgeGuard state directory.
 
 `transaction_apply` verifies that:
 
 1. the original project is still at the exact commit from which the transaction began;
 2. the original project has no local modifications;
-3. transaction changes can be committed before they are cherry-picked into the original.
+3. all configured apply gates pass;
+4. transaction changes can be committed before they are cherry-picked into the original.
 
-If the original moved or became dirty, ForgeGuard refuses to apply rather than guessing how to merge concurrent work.
+If the original moved, became dirty, or a gate fails, ForgeGuard refuses to apply rather than guessing how to merge or bypass validation.
+
+### Recovery after restart
+
+Recovered transaction metadata is accepted only when it still maps to a persistently registered project under the current allowed roots and to a real managed worktree below the ForgeGuard worktree directory. Branch names and transaction metadata are also structurally validated.
+
+Tampered or stale records that fail those checks are ignored rather than becoming new filesystem/Git authority.
+
+## Project Brain
+
+Project Brain is explicit local state, not hidden model memory. It stores context, task descriptions/notes, and decisions under the ForgeGuard state directory so another MCP session can resume work.
+
+Project Brain content is not copied into the audit log. The audit log records only operation metadata such as tool names, project ids, timestamps, status, and bounded size/count information.
+
+Project Brain is not a security policy source and cannot grant filesystem, Git, or process capabilities.
 
 ## Important limitation
 
-ForgeGuard v0.2 is **not an operating-system sandbox**. If the local administrator explicitly allows an executable or project script, that process may still access resources outside the workspace through operating-system APIs, absolute paths, subprocesses, or network access available to that process.
+ForgeGuard is **not yet an operating-system sandbox**. If the local administrator explicitly allows an executable or project script, that process may still access resources outside the workspace through operating-system APIs, absolute paths, subprocesses, or network access available to that process.
 
-`transaction_process_run` has the same limitation: a Git worktree isolates repository changes, not operating-system capabilities.
+`transaction_process_run` and apply gates have the same limitation: a Git worktree isolates repository changes, not operating-system capabilities.
 
 Do not enable generic process execution for untrusted repositories. Stronger OS/container sandboxing remains a planned milestone.
 
