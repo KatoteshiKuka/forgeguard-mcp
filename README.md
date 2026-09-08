@@ -2,11 +2,11 @@
 
 ForgeGuard MCP is an open-source, local-first Model Context Protocol (MCP) server for controlled AI access to software projects.
 
-It is designed for coding agents that need to inspect, modify, test, and reason about projects without receiving unrestricted access to the entire machine.
+It is designed for coding agents that need to inspect, modify, test, and resume work on projects without receiving unrestricted access to the entire machine.
 
 > Status: early development — `0.2.0-alpha.1`.
 
-## What v0.2 already does
+## What the current alpha does
 
 - persistently register project workspaces only below explicitly allowed roots
 - read, atomically write, and exactly patch guarded UTF-8 files
@@ -16,11 +16,16 @@ It is designed for coding agents that need to inspect, modify, test, and reason 
 - reject lexical traversal and symlink escapes
 - run `git status` and `git diff` without a shell
 - optionally run explicitly allowlisted executables with `shell: false`
-- apply per-project policies stored outside project workspaces
+- apply fail-closed per-project policies stored outside project workspaces
+- enforce mandatory test/build/analyze gates before transaction apply
 - maintain a structured local JSONL audit log without file bodies or command arguments
 - start isolated Git worktree transactions
 - edit, inspect, test, apply, or abort transaction changes without touching the original until apply
 - refuse transaction apply when the original repository has moved or become dirty
+- persist and recover valid active transactions after ForgeGuard restarts
+- reject recovered transaction records that do not match an authorized registered project/worktree
+- maintain a persistent Project Brain with project context, tasks, progress notes, and decisions
+- resume task state across ChatGPT/Codex/other MCP client sessions with `task_resume`
 
 ## Security defaults
 
@@ -35,7 +40,7 @@ Important environment variables:
 
 Generic process execution is disabled until the local user explicitly enables commands.
 
-ForgeGuard v0.2 is **not an operating-system sandbox**. An explicitly permitted executable or repository script can still access OS resources outside the workspace. Git worktree transactions isolate repository changes, not operating-system capabilities.
+ForgeGuard is **not yet an operating-system sandbox**. An explicitly permitted executable or repository script can still access OS resources outside the workspace. Git worktree transactions isolate repository changes, not operating-system capabilities.
 
 See [`SECURITY.md`](SECURITY.md) for the current security boundary.
 
@@ -95,8 +100,10 @@ By default ForgeGuard stores local state under:
 ```text
 ~/.forgeguard/
 ├── projects.json
+├── transactions.json
 ├── audit.jsonl
 ├── policies/
+├── brain/
 └── worktrees/
 ```
 
@@ -106,11 +113,11 @@ Override it with:
 export FORGEGUARD_STATE_DIR="$HOME/.local/share/forgeguard"
 ```
 
-## Per-project policy
+## Per-project policy and apply gates
 
-After registering a project, call `project_policy_get` to see its project id, effective policy, and policy file path.
+After registering a project, call `project_policy_get` to see its effective policy and policy file path.
 
-A policy file can look like:
+Example Node policy:
 
 ```json
 {
@@ -118,13 +125,19 @@ A policy file can look like:
   "allowFileWrite": true,
   "allowGitRead": true,
   "allowProcessRun": true,
-  "allowedCommands": ["npm", "flutter"]
+  "allowedCommands": ["npm"],
+  "applyGates": [
+    { "command": "npm", "args": ["test"], "timeoutMs": 180000 },
+    { "command": "npm", "args": ["run", "build"], "timeoutMs": 180000 }
+  ]
 }
 ```
 
-`allowedCommands` can only narrow the global `FORGEGUARD_COMMANDS` set. It cannot grant additional executables.
+`allowedCommands` can only narrow the global `FORGEGUARD_COMMANDS` set. A project policy cannot grant a command that the local administrator did not enable globally.
 
-Malformed policy JSON fails closed for protected operations.
+If an apply gate exits non-zero, times out, or uses a non-authorized command, `transaction_apply` is refused and the original project remains unchanged. The transaction stays available for correction or abort.
+
+See [`docs/policies.md`](docs/policies.md).
 
 ## MCP client configuration
 
@@ -149,7 +162,7 @@ Adapt the surrounding configuration format to the MCP client you use.
 
 ## Current MCP tools
 
-### Projects
+### Projects and policy
 
 - `project_register`
 - `project_list`
@@ -186,6 +199,18 @@ Adapt the surrounding configuration format to the MCP client you use.
 - `transaction_apply`
 - `transaction_abort`
 
+### Project Brain
+
+- `project_context_get`
+- `project_context_set`
+- `task_create`
+- `task_list`
+- `task_get`
+- `task_update`
+- `task_resume`
+- `decision_add`
+- `decision_list`
+
 ### Audit
 
 - `audit_recent`
@@ -195,20 +220,28 @@ Adapt the surrounding configuration format to the MCP client you use.
 ```text
 project_register
       ↓
+task_create / task_resume
+      ↓
 transaction_begin
       ↓
 inspect / edit / patch inside transaction
       ↓
-transaction_process_run (tests / analysis, if explicitly allowed)
+transaction_process_run (optional manual checks)
       ↓
 transaction_diff
       ↓
 transaction_apply
       │
-      └── refuses if original repo changed or became dirty
+      ├── mandatory policy gates run
+      ├── refuses if original repo changed or became dirty
+      └── commit/cherry-pick + cleanup if everything passes
+      ↓
+task_update / decision_add
 ```
 
-Use `transaction_abort` whenever the work should be discarded.
+If ForgeGuard or the MCP client restarts while a valid transaction is open, ForgeGuard can recover it from local state after validating it against the registered project and managed worktree directory.
+
+See [`docs/transactions.md`](docs/transactions.md) and [`docs/project-brain.md`](docs/project-brain.md).
 
 ## Development
 
@@ -218,7 +251,7 @@ npm run build
 npm test
 ```
 
-The suite covers path traversal, symlink escape, sensitive-file handling, atomic writes, project persistence, per-project policy narrowing, audit metadata, real Git worktree apply/abort, and real MCP stdio integration with server restart.
+The suite covers path traversal, symlink escape, sensitive-file handling, atomic writes, project persistence, per-project policy narrowing, apply gates, audit metadata, Project Brain concurrency/persistence, real Git worktree apply/abort/recovery, tampered recovery state, and real MCP stdio restart/handoff flows.
 
 GitHub Actions runs build and tests on Node.js 20 and 22.
 
@@ -226,19 +259,19 @@ GitHub Actions runs build and tests on Node.js 20 and 22.
 
 ### Next
 
-- persistent active transaction recovery after server restart
-- named command profiles (`test`, `analyze`, `build`) instead of relying only on executable allowlists
-- test gates that can be attached to `transaction_apply`
-- richer transaction diff summaries
-- project task/context state
+- named command profiles (`test`, `analyze`, `build`) with project stack detection
+- richer transaction diff/risk summaries
+- task-to-transaction linking and automatic progress checkpoints
+- project context compiler that selects task-relevant files/symbols/tests
+- safer process isolation using OS/container sandboxing
 
 ### Later
 
-- OS/container process sandboxing
 - remote device agent
 - multi-machine support
-- task handoff between ChatGPT, Codex, and other MCP clients
-- project context compiler / code graph
+- richer handoff between ChatGPT, Codex, IDE agents, and scheduled workers
+- code graph / symbol dependency index
+- optional local UI for approvals, audit, tasks, and active transactions
 
 ## License
 
